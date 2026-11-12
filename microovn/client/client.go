@@ -375,3 +375,14 @@ func GetBgpAttachStatus(ctx context.Context, c microTypes.Client) (types.SetupBg
 	err := c.Query(queryCtx, "GET", types.APIVersion, &url.URL{Path: "bgp/attach"}, nil, &responseData)
 	return responseData, err
 }
+
+// SetBgpAttachRack sets or clears one member's rack label
+// (`microovn setup bgp-attach label`).
+func SetBgpAttachRack(ctx context.Context, c microTypes.Client, request types.SetBgpAttachRackRequest) (types.SetupBgpAttachResponse, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, bgpAttachTimeout)
+	defer cancel()
+
+	responseData := types.SetupBgpAttachResponse{}
+	err := c.Query(queryCtx, "POST", types.APIVersion, &url.URL{Path: "bgp/attach/rack"}, request, &responseData)
+	return responseData, err
+}

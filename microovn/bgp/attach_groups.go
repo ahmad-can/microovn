@@ -1,8 +1,9 @@
 package bgp
 
 // Rules that span groups. One MicroOVN cluster covers every rack, so each
-// group (one per leaf) must not step on another: a member peers with one leaf,
-// and numbered groups need separate transit subnets and leaf addresses.
+// group (one per leaf) must not step on another: a rack has one group, a
+// member peers with one leaf, and numbered groups need separate transit
+// subnets and leaf addresses.
 
 import (
 	"fmt"
@@ -32,17 +33,20 @@ func FindGroup(groups []AttachIntent, key string) *AttachIntent {
 	return nil
 }
 
-// CheckGroupConflicts checks a group against the other stored groups. A stored
-// group with the same key (peer) is the one being replaced and is ignored.
+// CheckGroupConflicts checks a group against the other groups. A group with
+// the same key (peer) is the one being replaced and is ignored.
 func CheckGroupConflicts(group AttachIntent, existing []AttachIntent) error {
 	for _, other := range existing {
 		if other.Key() == group.Key() {
 			continue
 		}
+		if group.Rack != "" && group.Rack == other.Rack {
+			return fmt.Errorf("rack %s already peers with %s; a rack has one leaf (use 'disable --peer %s' first to change it)",
+				group.Rack, other.Key(), other.Key())
+		}
 		for _, m := range group.Members {
 			if other.HasMember(m) {
-				return fmt.Errorf("member %s already peers with %s; remove it from that group first (rerun it without %s), then add it here",
-					m, other.Key(), m)
+				return fmt.Errorf("member %s already peers with %s", m, other.Key())
 			}
 		}
 		if !group.Numbered() || !other.Numbered() {
@@ -72,17 +76,15 @@ func GroupKeyFromPeer(peer string) (string, error) {
 	return fmt.Sprintf("%d@%s", peers[0].ASN, peers[0].Address), nil
 }
 
-// MergeGroup builds the group a `setup bgp-attach` call results in. The call
-// is the whole truth: its settings and its member list replace what is stored
-// (members not listed leave the group). Members that stay keep their address
-// and their recorded uplink; new members get the lowest free address.
+// MergeGroup builds a group from its new settings and members (incoming)
+// against its stored version (existing, nil if new). incoming's settings and
+// members replace what is stored. Members that stay keep their address and
+// their recorded uplink; new members get the lowest free address. A group may
+// have no members (no member is labelled with its rack yet).
 func MergeGroup(existing *AttachIntent, incoming AttachIntent) (AttachIntent, error) {
 	merged := incoming
 	merged.Members = slices.Clone(incoming.Members)
 	sort.Strings(merged.Members)
-	if len(merged.Members) == 0 {
-		return merged, fmt.Errorf("--members is required: an empty list would remove every member (use 'disable --peer %s' for that)", incoming.Key())
-	}
 	merged.Ports = keptPorts(existing, merged.Members)
 	if err := AllocateGroup(&merged, existing); err != nil {
 		return merged, err

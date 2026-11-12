@@ -10,12 +10,12 @@ import (
 
 func TestAttachTableRows(t *testing.T) {
 	rows := attachTableRows([]types.BgpAttachNodePlan{
-		{Member: "compute-0", MemberID: 4, Address: "192.0.2.18/28", Peer: "65101@192.0.2.17", Attached: true, RouterPort: "lrp-c0"},
+		{Member: "compute-0", MemberID: 4, Rack: "rack1", Address: "192.0.2.18/28", Peer: "65101@192.0.2.17", Attached: true, RouterPort: "lrp-c0"},
 		{Member: "compute-1"},
 	})
 	want := [][]string{
-		{"65101@192.0.2.17", "compute-0", "4", "192.0.2.18/28", "true", "lrp-c0"},
-		{"-", "compute-1", "-", "-", "false", "-"},
+		{"rack1", "65101@192.0.2.17", "compute-0", "4", "192.0.2.18/28", "true", "lrp-c0"},
+		{"-", "-", "compute-1", "-", "-", "false", "-"},
 	}
 	if len(rows) != len(want) {
 		t.Fatalf("got %d rows, want %d", len(rows), len(want))
@@ -42,18 +42,37 @@ func TestPrintAttachResponseExitCode(t *testing.T) {
 	}
 }
 
-func TestSplitMembers(t *testing.T) {
-	if got := splitMembers(" c0, ,c1,"); !slices.Equal(got, []string{"c0", "c1"}) {
-		t.Fatalf("got %v", got)
-	}
-}
-
 func TestAttachGroupLine(t *testing.T) {
-	line := attachGroupLine(types.SetupBgpAttachRequest{Members: []string{"c0", "c1"}, Peer: "65101@fe80::1", AdvertiseTable: 42, UplinkPattern: "*br-bgp"})
-	for _, want := range []string{"peer: 65101@fe80::1", "networks: (unnumbered)", "members: c0,c1"} {
+	line := attachGroupLine(types.BgpAttachGroup{
+		SetupBgpAttachRequest: types.SetupBgpAttachRequest{Rack: "rack1", Peer: "65101@fe80::1", AdvertiseTable: 42, UplinkPattern: "*br-bgp"},
+		Members:               []string{"c0", "c1"},
+	})
+	for _, want := range []string{"rack: rack1", "peer: 65101@fe80::1", "networks: (unnumbered)", "members: c0,c1"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("line %q missing %q", line, want)
 		}
+	}
+	empty := attachGroupLine(types.BgpAttachGroup{SetupBgpAttachRequest: types.SetupBgpAttachRequest{Rack: "rack2", Peer: "65102@fe80::1"}})
+	if !strings.Contains(empty, "members: (none yet)") {
+		t.Errorf("line %q should say no member is labelled yet", empty)
+	}
+}
+
+func TestLabelFlagsValidation(t *testing.T) {
+	c := &cmdSetupBgpAttach{flagLabelClear: true, flagLabelRack: "rack1"}
+	if err := c.runLabel(nil, nil); err == nil || !strings.Contains(err.Error(), "either --rack or --clear") {
+		t.Fatalf("got %v", err)
+	}
+	c = &cmdSetupBgpAttach{}
+	if err := c.runLabel(nil, nil); err == nil || !strings.Contains(err.Error(), "--rack is required") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestRunRequiresRack(t *testing.T) {
+	c := &cmdSetupBgpAttach{flagPeer: "65101@fe80::1"}
+	if err := c.Run(nil, nil); err == nil || !strings.Contains(err.Error(), "--rack is required") {
+		t.Fatalf("got %v", err)
 	}
 }
 

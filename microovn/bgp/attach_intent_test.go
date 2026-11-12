@@ -8,9 +8,9 @@ import (
 	"github.com/canonical/microovn/microovn/api/types"
 )
 
-// req builds a request with one member, the common case in these tests.
+// req builds a request for rack1, the common case in these tests.
 func req(peer, networks string) types.SetupBgpAttachRequest {
-	return types.SetupBgpAttachRequest{Members: []string{"m1"}, Peer: peer, Networks: networks}
+	return types.SetupBgpAttachRequest{Rack: "rack1", Peer: peer, Networks: networks}
 }
 
 func TestParseAttachIntent(t *testing.T) {
@@ -37,11 +37,12 @@ func TestParseAttachIntent(t *testing.T) {
 		{name: "peer is network address", req: req("65101@192.0.2.16", "192.0.2.16/28"), wantErr: "network/broadcast"},
 		{name: "unnumbered with pool", req: req("65101@fe80::1", "192.0.2.0/28"), wantErr: "only used with an IPv4 peer"},
 		{name: "global IPv6 peer", req: req("65101@2001:db8::1", ""), wantErr: "invalid address"},
-		{name: "reserved table", req: types.SetupBgpAttachRequest{Members: []string{"m1"}, Peer: "65101@fe80::1", AdvertiseTable: 254}, wantErr: "reserved kernel table"},
-		{name: "bad pattern", req: types.SetupBgpAttachRequest{Members: []string{"m1"}, Peer: "65101@fe80::1", UplinkPattern: "[br-bgp"}, wantErr: "not a valid glob"},
-		{name: "no members", req: types.SetupBgpAttachRequest{Peer: "65101@fe80::1"}, wantErr: "--members is required"},
-		{name: "blank members", req: types.SetupBgpAttachRequest{Members: []string{" ", ""}, Peer: "65101@fe80::1"}, wantErr: "--members is required"},
-		{name: "duplicate member", req: types.SetupBgpAttachRequest{Members: []string{"a", "a"}, Peer: "65101@fe80::1"}, wantErr: "lists a twice"},
+		{name: "reserved table", req: types.SetupBgpAttachRequest{Rack: "rack1", Peer: "65101@fe80::1", AdvertiseTable: 254}, wantErr: "reserved kernel table"},
+		{name: "bad pattern", req: types.SetupBgpAttachRequest{Rack: "rack1", Peer: "65101@fe80::1", UplinkPattern: "[br-bgp"}, wantErr: "not a valid glob"},
+		{name: "no rack", req: types.SetupBgpAttachRequest{Peer: "65101@fe80::1"}, wantErr: "--rack: a rack name is required"},
+		{name: "blank rack", req: types.SetupBgpAttachRequest{Rack: "  ", Peer: "65101@fe80::1"}, wantErr: "--rack: a rack name is required"},
+		{name: "bad rack name", req: types.SetupBgpAttachRequest{Rack: "rack 1", Peer: "65101@fe80::1"}, wantErr: "invalid rack name"},
+		{name: "rack name from MAAS", req: types.SetupBgpAttachRequest{Rack: "stg-reproducer-hassahma-maas", Peer: "65101@fe80::1"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -60,15 +61,15 @@ func TestParseAttachIntent(t *testing.T) {
 }
 
 func TestParseAttachIntentDefaults(t *testing.T) {
-	intent, err := ParseAttachIntent(types.SetupBgpAttachRequest{Members: []string{"b", " a "}, Peer: " 65101@192.0.2.17 ", Networks: "192.0.2.18/28"})
+	intent, err := ParseAttachIntent(types.SetupBgpAttachRequest{Rack: " rack1 ", Peer: " 65101@192.0.2.17 ", Networks: "192.0.2.18/28"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if intent.AdvertiseTable != 42 || intent.UplinkPattern != "*br-bgp" {
 		t.Fatalf("defaults = table %d pattern %q", intent.AdvertiseTable, intent.UplinkPattern)
 	}
-	if strings.Join(intent.Members, ",") != "a,b" {
-		t.Fatalf("members %v, want trimmed and sorted", intent.Members)
+	if intent.Rack != "rack1" || len(intent.Members) != 0 {
+		t.Fatalf("rack %q members %v, want trimmed rack and no members yet", intent.Rack, intent.Members)
 	}
 	if intent.Key() != "65101@192.0.2.17" || intent.Request().Networks != "192.0.2.18/28" {
 		t.Fatalf("key %q networks %q", intent.Key(), intent.Request().Networks)
@@ -77,11 +78,12 @@ func TestParseAttachIntentDefaults(t *testing.T) {
 
 func TestGroupStorageRoundTrip(t *testing.T) {
 	in, err := ParseAttachIntent(types.SetupBgpAttachRequest{
-		Members: []string{"c1", "c0"}, Peer: "65101@192.0.2.17", Networks: "192.0.2.18/28", AdvertiseTable: 42,
+		Rack: "rack1", Peer: "65101@192.0.2.17", Networks: "192.0.2.18/28", AdvertiseTable: 42,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	in.Members = []string{"c0", "c1"}
 	if err := AllocateGroup(&in, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -104,6 +106,24 @@ func TestGroupStorageRoundTrip(t *testing.T) {
 	}
 	if _, err := decodeGroup(types.BgpAttachGroupKeyPrefix+"65101@192.0.2.17", "{not json"); err == nil {
 		t.Fatal("corrupt JSON must be rejected")
+	}
+}
+
+// A group stored by the earlier build (members listed by hand, no rack) still
+// loads, so it keeps working and can be disabled.
+func TestDecodeGroupWithoutRack(t *testing.T) {
+	old := `{"members":["c1","c0"],"peer":"65101@fe80::1","advertise_table":42,"uplink_pattern":"*br-bgp"}`
+	g, err := decodeGroup(types.BgpAttachGroupKeyPrefix+"65101@fe80::1", old)
+	if err != nil {
+		t.Fatalf("old group must still load: %v", err)
+	}
+	if g.Rack != "" || strings.Join(g.Members, ",") != "c0,c1" {
+		t.Fatalf("rack %q members %v", g.Rack, g.Members)
+	}
+	// Resolving keeps its members as they are: no label can change them.
+	_, changes, _, err := ResolveGroups([]AttachIntent{g}, AttachState{Groups: []AttachIntent{g}, Labels: map[string]string{"c2": "rack1"}}, nil)
+	if err != nil || len(changes) != 0 {
+		t.Fatalf("changes %v, err %v; want none", changes, err)
 	}
 }
 

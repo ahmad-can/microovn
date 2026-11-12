@@ -62,6 +62,12 @@ func ReconcileAttach(ctx context.Context, s microTypes.State) error {
 }
 
 func reconcileAttach(ctx context.Context, s microTypes.State) error {
+	// Backstop for the PostRemove hook: drop the rack labels of members that
+	// left the cluster. It only reads when nobody has left.
+	if err := PruneDepartedMembers(ctx, s); err != nil {
+		logger.Warnf("BGP attach: failed to drop departed members' rack labels: %v", err)
+	}
+
 	// Attach only makes sense on a node running the OVS switch. Skip the whole
 	// pass cheaply otherwise, so central-only nodes don't block on the (30s)
 	// switch DB wait every tick and log reconciler failures for a feature they

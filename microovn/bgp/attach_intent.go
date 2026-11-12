@@ -1,12 +1,12 @@
 package bgp
 
-// A bgp-attach group is the answer to "how should these members peer": one leaf
-// peer, an optional IPv4 pool, the advertise table, the uplink name pattern and
-// the members that use it (in practice, one rack). A group is identified by its
-// peer, since every rack has its own leaf. Each group lives in dqlite under its
-// own key together with the addresses allocated to its members, so every
-// member finds its group and derives its own per-node keys from it on each
-// reconcile tick.
+// A bgp-attach group is the answer to "how should one rack's members peer": one
+// leaf peer, an optional IPv4 pool, the advertise table, the uplink name
+// pattern and the rack. Its members are the cluster members labelled with that
+// rack. A group is identified by its peer, since every rack has its own leaf.
+// Each group lives in dqlite under its own key together with its resolved
+// members and their allocated addresses, so every member finds its group and
+// derives its own per-node keys from it on each reconcile tick.
 
 import (
 	"context"
@@ -32,7 +32,12 @@ const maxAttachPoolBits = 16
 
 // AttachIntent is a parsed, validated bgp-attach group.
 type AttachIntent struct {
-	// Members are the group's cluster members, sorted and unique.
+	// Rack is the rack whose labelled members make up the group. Empty only
+	// for a group stored by an earlier build, whose members were listed by
+	// hand; such a group keeps its members until it is disabled.
+	Rack string
+	// Members are the group's cluster members, sorted and unique: the members
+	// labelled with Rack, resolved whenever a label or the group changes.
 	Members []string
 	Peer    types.Peer
 	// Pool is the IPv4 address pool (numbered), kept exactly as given: its
@@ -68,10 +73,10 @@ func (i AttachIntent) PeerString() string {
 // Key identifies the group: its peer.
 func (i AttachIntent) Key() string { return i.PeerString() }
 
-// Request renders the group back to the request form (for output).
+// Request renders the group's settings back to the request form.
 func (i AttachIntent) Request() types.SetupBgpAttachRequest {
 	req := types.SetupBgpAttachRequest{
-		Members:        slices.Clone(i.Members),
+		Rack:           i.Rack,
 		Peer:           i.PeerString(),
 		AdvertiseTable: i.AdvertiseTable,
 		UplinkPattern:  i.UplinkPattern,
@@ -82,28 +87,26 @@ func (i AttachIntent) Request() types.SetupBgpAttachRequest {
 	return req
 }
 
-// ParseAttachIntent validates a request and returns the group it describes,
-// with defaults filled in. Addresses are not part of a request; they are
-// allocated separately. It does not touch the system.
-func ParseAttachIntent(req types.SetupBgpAttachRequest) (AttachIntent, error) {
-	var intent AttachIntent
+// Group renders the group for output: its settings and resolved members.
+func (i AttachIntent) Group() types.BgpAttachGroup {
+	return types.BgpAttachGroup{SetupBgpAttachRequest: i.Request(), Members: slices.Clone(i.Members)}
+}
 
-	seen := map[string]bool{}
-	for _, m := range req.Members {
-		m = strings.TrimSpace(m)
-		if m == "" {
-			continue
-		}
-		if seen[m] {
-			return intent, fmt.Errorf("--members lists %s twice", m)
-		}
-		seen[m] = true
-		intent.Members = append(intent.Members, m)
+// ParseAttachIntent validates a request and returns the group it describes,
+// with defaults filled in and no members yet: they are resolved from the rack
+// labels (ResolveGroups), and addresses are allocated then. It does not touch
+// the system.
+func ParseAttachIntent(req types.SetupBgpAttachRequest) (AttachIntent, error) {
+	if err := ValidateRackName(req.Rack); err != nil {
+		return AttachIntent{}, fmt.Errorf("--rack: %w", err)
 	}
-	if len(intent.Members) == 0 {
-		return intent, fmt.Errorf("--members is required: list the cluster members that peer with this leaf (as shown by 'microovn cluster list')")
-	}
-	sort.Strings(intent.Members)
+	return parseGroupSettings(req)
+}
+
+// parseGroupSettings validates everything in a request but the rack, which a
+// group stored by an earlier build does not have.
+func parseGroupSettings(req types.SetupBgpAttachRequest) (AttachIntent, error) {
+	intent := AttachIntent{Rack: strings.TrimSpace(req.Rack)}
 
 	peers, err := types.ParsePeers(req.Peer)
 	if err != nil {
@@ -171,7 +174,7 @@ func ParseAttachIntent(req types.SetupBgpAttachRequest) (AttachIntent, error) {
 
 // Equal reports whether two groups are the same, including allocations.
 func (i AttachIntent) Equal(o AttachIntent) bool {
-	return slices.Equal(i.Members, o.Members) && i.Peer == o.Peer && i.Pool == o.Pool &&
+	return i.Rack == o.Rack && slices.Equal(i.Members, o.Members) && i.Peer == o.Peer && i.Pool == o.Pool &&
 		i.AdvertiseTable == o.AdvertiseTable && i.UplinkPattern == o.UplinkPattern &&
 		maps.Equal(i.Addresses, o.Addresses) &&
 		maps.EqualFunc(i.Ports, o.Ports, func(a, b PortRecord) bool {
@@ -184,17 +187,18 @@ func (i AttachIntent) HasMember(member string) bool {
 	return slices.Contains(i.Members, member)
 }
 
-// groupRecord is the stored form of a group: the request, the allocations and
-// the members' router ports with their pre-attach values.
+// groupRecord is the stored form of a group: the settings, the resolved
+// members, the allocations and the members' router ports with their
+// pre-attach values.
 type groupRecord struct {
-	types.SetupBgpAttachRequest
+	types.BgpAttachGroup
 	Addresses map[string]string     `json:"addresses,omitempty"`
 	Ports     map[string]PortRecord `json:"ports,omitempty"`
 }
 
 // encodeGroup / decodeGroup convert a group to and from its stored JSON.
 func encodeGroup(intent AttachIntent) (string, error) {
-	rec := groupRecord{SetupBgpAttachRequest: intent.Request(), Ports: intent.Ports}
+	rec := groupRecord{BgpAttachGroup: intent.Group(), Ports: intent.Ports}
 	if len(intent.Addresses) > 0 {
 		rec.Addresses = map[string]string{}
 		for m, a := range intent.Addresses {
@@ -213,13 +217,18 @@ func decodeGroup(key, value string) (AttachIntent, error) {
 	if err := json.Unmarshal([]byte(value), &rec); err != nil {
 		return AttachIntent{}, fmt.Errorf("stored %s is not valid JSON: %w", key, err)
 	}
-	intent, err := ParseAttachIntent(rec.SetupBgpAttachRequest)
+	intent, err := parseGroupSettings(rec.SetupBgpAttachRequest)
+	if err == nil && intent.Rack != "" {
+		err = ValidateRackName(intent.Rack)
+	}
 	if err != nil {
 		return AttachIntent{}, fmt.Errorf("stored %s is invalid: %w", key, err)
 	}
 	if want := types.BgpAttachGroupKeyPrefix + intent.Key(); want != key {
 		return AttachIntent{}, fmt.Errorf("stored %s is for peer %s", key, intent.Key())
 	}
+	intent.Members = slices.Clone(rec.Members)
+	sort.Strings(intent.Members)
 	intent.Ports = rec.Ports
 	if len(rec.Addresses) > 0 {
 		intent.Addresses = map[string]netip.Prefix{}
@@ -272,60 +281,4 @@ func HasAttachIntent(ctx context.Context, s microTypes.State) (bool, error) {
 		return false, err
 	}
 	return len(groups) > 0, nil
-}
-
-// UpdateAttachGroups reads the stored groups, passes them to change and writes
-// back what it returns (group key -> new group, or nil to delete the group),
-// all in one database transaction. Concurrent updates therefore never lose
-// each other's members or hand out the same address twice: a transaction that
-// races another is retried by the database layer, re-running change on the
-// fresh state, so change must only compute (no side effects).
-func UpdateAttachGroups(ctx context.Context, s microTypes.State, change func(groups []AttachIntent) (map[string]*AttachIntent, error)) error {
-	err := s.Database().Transaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		items, err := database.GetConfigItems(ctx, tx)
-		if err != nil {
-			return err
-		}
-		groups, err := decodeGroups(items)
-		if err != nil {
-			return err
-		}
-		changes, err := change(groups)
-		if err != nil {
-			return err
-		}
-		for key, group := range changes {
-			dbKey := types.BgpAttachGroupKeyPrefix + key
-			exists, err := database.ConfigItemExists(ctx, tx, dbKey)
-			if err != nil {
-				return err
-			}
-			if group == nil {
-				if exists {
-					if err := database.DeleteConfigItem(ctx, tx, dbKey); err != nil {
-						return err
-					}
-				}
-				continue
-			}
-			value, err := encodeGroup(*group)
-			if err != nil {
-				return err
-			}
-			item := database.ConfigItem{Key: dbKey, Value: value}
-			if exists {
-				err = database.UpdateConfigItem(ctx, tx, dbKey, item)
-			} else {
-				_, err = database.CreateConfigItem(ctx, tx, item)
-			}
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("failed to update bgp-attach groups: %w", err)
-	}
-	return nil
 }

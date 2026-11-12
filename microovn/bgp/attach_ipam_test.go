@@ -143,7 +143,7 @@ func TestAllocateRackSizedPools(t *testing.T) {
 }
 
 func TestAllocateGroupUnnumbered(t *testing.T) {
-	g, err := ParseAttachIntent(types.SetupBgpAttachRequest{Members: []string{"c0"}, Peer: "65101@fe80::1"})
+	g, err := ParseAttachIntent(types.SetupBgpAttachRequest{Rack: "rack1", Peer: "65101@fe80::1"})
 	if err != nil {
 		t.Fatal(err)
 	}

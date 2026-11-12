@@ -1,18 +1,25 @@
 package bgp
 
 import (
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/canonical/microovn/microovn/api/types"
 )
 
+// mustGroup builds a group with the given members already resolved. Its rack
+// is named after the peer's ASN, so groups with different ASNs are different
+// racks.
 func mustGroup(t *testing.T, members []string, peer, networks string) AttachIntent {
 	t.Helper()
-	g, err := ParseAttachIntent(types.SetupBgpAttachRequest{Members: members, Peer: peer, Networks: networks})
+	asn, _, _ := strings.Cut(strings.TrimSpace(peer), "@")
+	g, err := ParseAttachIntent(types.SetupBgpAttachRequest{Rack: "rack-" + asn, Peer: peer, Networks: networks})
 	if err != nil {
 		t.Fatalf("group %s: %v", peer, err)
 	}
+	g.Members = append([]string(nil), members...)
+	sort.Strings(g.Members)
 	return g
 }
 

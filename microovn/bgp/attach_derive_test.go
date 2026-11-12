@@ -82,7 +82,7 @@ func TestNetworksArg(t *testing.T) {
 }
 
 func TestLrpSetArgs(t *testing.T) {
-	intent, err := ParseAttachIntent(types.SetupBgpAttachRequest{Members: []string{"m1"}, Peer: "65101@192.0.2.17", Networks: "192.0.2.18/28"})
+	intent, err := ParseAttachIntent(types.SetupBgpAttachRequest{Rack: "rack1", Peer: "65101@192.0.2.17", Networks: "192.0.2.18/28"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestLrpSetArgs(t *testing.T) {
 	}
 
 	// Unnumbered never touches networks.
-	unnumbered, _ := ParseAttachIntent(types.SetupBgpAttachRequest{Members: []string{"m1"}, Peer: "65101@fe80::1"})
+	unnumbered, _ := ParseAttachIntent(types.SetupBgpAttachRequest{Rack: "rack1", Peer: "65101@fe80::1"})
 	if got := strings.Join(lrpSetArgs("lrp", desiredLrpFields(unnumbered, netip.Prefix{}), false), " "); strings.Contains(got, "networks=") {
 		t.Fatalf("unnumbered wrote networks: %s", got)
 	}

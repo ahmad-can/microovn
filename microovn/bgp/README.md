@@ -22,17 +22,22 @@ sudo ovn-nbctl set logical_router_port $LRP \
   external-ids:microovn-bgp-peers="65101@192.0.2.2"
 ```
 
-This PR adds one command that configures it per leaf (rack), so Sunbeam can
-drive it:
+This PR adds commands that configure it per leaf (rack), so Sunbeam can
+drive it. Each compute is labelled with its rack (the MicroOVN charm does
+this from the role-distributor `rack-name` workload param):
 
 ```bash
-microovn setup bgp-attach --peer 65101@192.0.2.17 --networks 192.0.2.18/28 --members c0,c1,c2
+microovn setup bgp-attach label --rack rack1
 ```
 
-Here, `192.0.2.18/28` is the range for assigning IPs to each compute node c0,
-c1 and c2, starting from `192.0.2.18`.
+Then the rack's peering is set once, on any compute:
 
-In the above example:
+```bash
+microovn setup bgp-attach --peer 65101@192.0.2.17 --networks 192.0.2.18/28 --rack rack1
+```
+
+Here, `192.0.2.18/28` is the range for assigning IPs to the computes labelled
+`rack1`, starting from `192.0.2.18`. With c0, c1 and c2 labelled `rack1`:
 
 ```
 192.0.2.18 -> c0
@@ -48,25 +53,27 @@ mp977ed87fo@mp977ed87fb  UP  ...
 mp977ed87fb@mp977ed87fo  UP  192.0.2.18
 ```
 
-## Different BGP peers for different computes
+## Racks and membership
 
-Run the command once per peer (leaf). Each `--peer` is a separate setting with
-its own `--networks` and `--members`; running it for one peer does not change
-the others.
+Run the command once per rack. Each `--peer` is a separate setting with its
+own `--networks` and `--rack`.
 
 ```bash
 # rack1 computes peer with leaf 1
-microovn setup bgp-attach --peer 65101@192.0.2.17 --networks 192.0.2.18/28 --members c0,c1,c2
+microovn setup bgp-attach --peer 65101@192.0.2.17 --networks 192.0.2.18/28 --rack rack1
 
 # rack2 computes peer with leaf 2
-microovn setup bgp-attach --peer 65102@192.0.2.33 --networks 192.0.2.34/28 --members c3,c4
+microovn setup bgp-attach --peer 65102@192.0.2.33 --networks 192.0.2.34/28 --rack rack2
 ```
 
-- `--members` is the complete list for that peer: rerunning a peer with a
-  different list adds/removes computes for that peer only.
-- A compute can belong to one peer only. To move c2 to leaf 2, first rerun
-  leaf 1 without it, then rerun leaf 2 with it.
-- Each peer needs its own subnet; overlapping `--networks` or a shared leaf
-  address are refused.
-- `microovn setup bgp-attach status` lists every peer and its computes;
-  `microovn setup bgp-attach disable --peer <peer>` removes one peer's setting.
+- Members follow their labels, with no rerun: labelling a compute adds it,
+  changing its label moves it to the other rack in one step, and
+  `label --clear` (or removing it from the cluster) removes it and frees its IP.
+- A compute that stays keeps its IP.
+- A label only changes when it is set or cleared; a late label never removes
+  anyone.
+- One setting per rack, and each rack needs its own subnet; overlapping
+  `--networks` or a shared leaf address are refused.
+- `microovn setup bgp-attach status` lists every rack, peer, compute and IP;
+  `microovn setup bgp-attach disable --peer <peer>` removes one rack's setting
+  (labels stay).
